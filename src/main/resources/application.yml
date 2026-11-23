@@ -1,0 +1,47 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: clearing-resilience-service
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:127.0.0.1}:${DB_PORT:5432}/${DB_NAME:ccdev}
+    username: ${DB_USER:ccdev}
+    password: ${DB_PASSWORD:ccdev}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+clearing:
+  rule-version: "2026.11"
+  scheduler:
+    # 默认关闭自动调度：验收通过 POST /api/scheduler/tick 手动驱动，保证确定性。
+    # 生产/演示持续运行可设 CLEARING_SCHEDULER_AUTO=true。
+    auto-enabled: ${CLEARING_SCHEDULER_AUTO:false}
+    interval-ms: ${CLEARING_SCHEDULER_INTERVAL_MS:3000}
+  backoff:
+    base-ms: 1000
+    max-ms: 10000
+    max-attempts: 5
+  storm:
+    window-seconds: 300
+    failure-storm-threshold: 5
+    failure-watch-threshold: 3
+    queue-growth-watch-threshold: 5
+  coordinator:
+    ticks-per-period: 10
+  buckets:
+    RULE_ENGINE:
+      capacity: 6
+      refill-per-tick: 2
+    FUND_GW:
+      capacity: 3
+      refill-per-tick: 1
