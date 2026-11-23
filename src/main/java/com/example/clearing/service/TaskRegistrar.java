@@ -1,6 +1,5 @@
 package com.example.clearing.service;
 
-import com.example.clearing.config.ClearingProperties;
 import com.example.clearing.domain.ClearingTask;
 import com.example.clearing.domain.Decision;
 import com.example.clearing.domain.SourceType;
@@ -31,20 +30,23 @@ public class TaskRegistrar {
 
     private final ClearingTaskRepository taskRepository;
     private final CatalogService catalogService;
-    private final ClearingProperties properties;
     private final FailureClassifier failureClassifier;
     private final EventLog eventLog;
+    private final RuleSnapshotService snapshotService;
+    private final TaskRuleBinder ruleBinder;
 
     public TaskRegistrar(ClearingTaskRepository taskRepository,
             CatalogService catalogService,
-            ClearingProperties properties,
             FailureClassifier failureClassifier,
-            EventLog eventLog) {
+            EventLog eventLog,
+            RuleSnapshotService snapshotService,
+            TaskRuleBinder ruleBinder) {
         this.taskRepository = taskRepository;
         this.catalogService = catalogService;
-        this.properties = properties;
         this.failureClassifier = failureClassifier;
         this.eventLog = eventLog;
+        this.snapshotService = snapshotService;
+        this.ruleBinder = ruleBinder;
     }
 
     public enum Outcome {
@@ -89,6 +91,10 @@ public class TaskRegistrar {
         task.setStatus(TaskStatus.READY);
         task.setNextAttemptAt(Instant.now());
         ClearingTask saved = taskRepository.save(task);
+        // 任务绑定器：入队时点固化规则版本（初始绑定，后续改绑只追加轨迹不删除）
+        String boundRule = ruleBinder.bindAtEnqueue(saved);
+        saved.setDependencyVersion("CAT=" + catalogService.currentVersion() + ";RULE=" + boundRule);
+        saved = taskRepository.save(saved);
         eventLog.record(saved, Decision.REGISTERED,
                 "登记成功：批次 " + batchId + "，清算日 " + clearingDate + "，来源 " + sourceType
                         + "，依赖版本 " + saved.getDependencyVersion() + "，金额优先级 " + bandOf(saved.getPriority()));
@@ -118,7 +124,8 @@ public class TaskRegistrar {
         task.setContentHash(contentHash);
         task.setSourceType(sourceType);
         task.setDependencyCode(DEP_RULE);
-        task.setDependencyVersion("CAT=" + catalogService.currentVersion() + ";RULE=" + properties.getRuleVersion());
+        task.setDependencyVersion("CAT=" + catalogService.currentVersion()
+                + ";RULE=" + snapshotService.currentEffectiveVersion());
         task.setAmount(amount);
         task.setPriority(priorityOf(amount));
         task.setStage(Stage.CALC);

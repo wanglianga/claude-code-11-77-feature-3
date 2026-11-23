@@ -18,7 +18,8 @@ public class OpenApiConfig {
                         .title("医保清算韧性服务 API")
                         .version("1.0.0")
                         .description("任务登记、失败判定、依赖状态图、幂等账本、预算分配（依赖本地令牌桶 + 协调器配额证据）、"
-                                + "调度、风暴观测与恢复解释。写操作需 admin 账号，查询可用 viewer 账号。"))
+                                + "调度、风暴观测、恢复解释，以及规则快照库/任务绑定器/影子复算器/差异裁决队列/结果发布册/影响通知。"
+                                + "写操作需 admin 账号，查询可用 viewer 账号。"))
                 .components(new Components().addSecuritySchemes("basicAuth",
                         new SecurityScheme().type(SecurityScheme.Type.HTTP).scheme("basic")))
                 .addSecurityItem(new SecurityRequirement().addList("basicAuth"));

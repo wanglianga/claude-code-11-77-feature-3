@@ -67,6 +67,30 @@ public class ClearingTask {
     @Column(name = "dependency_version", length = 128)
     private String dependencyVersion;
 
+    /** 任务绑定器：当前绑定的规则版本（待遇计算按此版本取快照） */
+    @Column(name = "rule_version", length = 32)
+    private String ruleVersion;
+
+    /** 入队时点绑定的初始规则版本（永不改变，版本链复现依据） */
+    @Column(name = "baseline_rule_version", length = 32)
+    private String baselineRuleVersion;
+
+    /** 更正任务指向的原任务 id（非更正任务为 null） */
+    @Column(name = "correction_of_id")
+    private Long correctionOfId;
+
+    /** 更正序号：0=正常任务，1..n=第 n 次更正 */
+    @Column(name = "correction_seq", nullable = false)
+    private int correctionSeq = 0;
+
+    /** 本任务被哪条更正任务替代（未更正为 null） */
+    @Column(name = "revised_by_id")
+    private Long revisedById;
+
+    /** 补正日期（更正任务专用，正常任务为清算日） */
+    @Column(name = "correction_date")
+    private LocalDate correctionDate;
+
     /** 受影响金额 */
     @Column(name = "amount", nullable = false, precision = 14, scale = 2)
     private BigDecimal amount;
@@ -176,6 +200,54 @@ public class ClearingTask {
 
     public void setDependencyVersion(String dependencyVersion) {
         this.dependencyVersion = dependencyVersion;
+    }
+
+    public String getRuleVersion() {
+        return ruleVersion;
+    }
+
+    public void setRuleVersion(String ruleVersion) {
+        this.ruleVersion = ruleVersion;
+    }
+
+    public String getBaselineRuleVersion() {
+        return baselineRuleVersion;
+    }
+
+    public void setBaselineRuleVersion(String baselineRuleVersion) {
+        this.baselineRuleVersion = baselineRuleVersion;
+    }
+
+    public Long getCorrectionOfId() {
+        return correctionOfId;
+    }
+
+    public void setCorrectionOfId(Long correctionOfId) {
+        this.correctionOfId = correctionOfId;
+    }
+
+    public int getCorrectionSeq() {
+        return correctionSeq;
+    }
+
+    public void setCorrectionSeq(int correctionSeq) {
+        this.correctionSeq = correctionSeq;
+    }
+
+    public Long getRevisedById() {
+        return revisedById;
+    }
+
+    public void setRevisedById(Long revisedById) {
+        this.revisedById = revisedById;
+    }
+
+    public LocalDate getCorrectionDate() {
+        return correctionDate;
+    }
+
+    public void setCorrectionDate(LocalDate correctionDate) {
+        this.correctionDate = correctionDate;
     }
 
     public BigDecimal getAmount() {

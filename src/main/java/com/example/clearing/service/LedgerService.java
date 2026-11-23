@@ -8,6 +8,7 @@ import com.example.clearing.domain.LedgerEntry;
 import com.example.clearing.domain.TaskStatus;
 import com.example.clearing.repo.ClearingTaskRepository;
 import com.example.clearing.repo.LedgerEntryRepository;
+import com.example.clearing.repo.RuleDiffCaseRepository;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -29,13 +30,19 @@ public class LedgerService {
     private final LedgerEntryRepository ledgerRepository;
     private final ClearingTaskRepository taskRepository;
     private final EventLog eventLog;
+    private final ResultPublicationService publicationService;
+    private final RuleDiffCaseRepository diffCaseRepository;
 
     public LedgerService(LedgerEntryRepository ledgerRepository,
             ClearingTaskRepository taskRepository,
-            EventLog eventLog) {
+            EventLog eventLog,
+            ResultPublicationService publicationService,
+            RuleDiffCaseRepository diffCaseRepository) {
         this.ledgerRepository = ledgerRepository;
         this.taskRepository = taskRepository;
         this.eventLog = eventLog;
+        this.publicationService = publicationService;
+        this.diffCaseRepository = diffCaseRepository;
     }
 
     public static String debitOpNo(ClearingTask task) {
@@ -116,6 +123,16 @@ public class LedgerService {
             task.setStage(com.example.clearing.domain.Stage.DONE);
             eventLog.record(task, Decision.CONFIRMED,
                     "回执已确认（操作号 " + operationNo + "），清算完成，金额 " + entry.getAmount());
+            // 结果发布册：确认即对外发布。更正任务追加修订行，绝不改写原行。
+            if (task.getCorrectionOfId() != null) {
+                Long diffCaseId = diffCaseRepository.findByCorrectionTaskId(task.getId())
+                        .map(com.example.clearing.domain.RuleDiffCase::getId).orElse(null);
+                publicationService.publishCorrection(task, entry.getAmount(), diffCaseId,
+                        "差异案件 " + diffCaseId + " 更正任务回执确认，补正日期 "
+                                + task.getCorrectionDate());
+            } else {
+                publicationService.publishOriginal(task, entry.getAmount());
+            }
             taskRepository.save(task);
         });
         return true;

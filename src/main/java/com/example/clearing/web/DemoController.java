@@ -50,7 +50,9 @@ public class DemoController {
 
     @Operation(summary = "执行验收场景",
             description = "hospital-batch / pharmacy-return / catalog-conflict / rule-degradation / "
-                    + "fund-pending-confirm / content-conflict / storm-watch")
+                    + "fund-pending-confirm / content-conflict / storm-watch / "
+                    + "rule-midnight-effective（规则跨午夜生效）/ rule-diff-withdraw（人工裁决撤回）/ "
+                    + "two-batch-correction（两批同项清单补正日期不同）")
     @PostMapping("/scenario/{name}")
     public ScenarioResult runScenario(@PathVariable String name) {
         return scenarioService.run(name);

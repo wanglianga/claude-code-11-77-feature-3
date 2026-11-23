@@ -4,7 +4,6 @@ import com.example.clearing.domain.ClearingTask;
 import com.example.clearing.dto.BillPayload;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
@@ -40,6 +39,7 @@ public class DownstreamSimulator {
     }
 
     private final ObjectMapper objectMapper;
+    private final RuleCalculationService calculationService;
 
     private volatile RuleMode ruleMode = RuleMode.NORMAL;
     private volatile FundMode fundMode = FundMode.NORMAL;
@@ -50,8 +50,9 @@ public class DownstreamSimulator {
     /** 人工确认的回执（模拟对账后人工补确认） */
     private final Set<String> manualConfirmed = ConcurrentHashMap.newKeySet();
 
-    public DownstreamSimulator(ObjectMapper objectMapper) {
+    public DownstreamSimulator(ObjectMapper objectMapper, RuleCalculationService calculationService) {
         this.objectMapper = objectMapper;
+        this.calculationService = calculationService;
     }
 
     public BillPayload parse(String payload) {
@@ -68,7 +69,10 @@ public class DownstreamSimulator {
         }
     }
 
-    /** 待遇规则计算：返回统筹支付金额（演示口径：总金额 × 0.7） */
+    /**
+     * 待遇规则计算：按任务绑定器固化的规则版本取快照口径（报文总额 × 快照统筹比例）。
+     * 绑定版本的快照即使已被替代/撤回仍保留在快照库中，保证历史任务按原口径可复现。
+     */
     public BigDecimal callRuleEngine(ClearingTask task, BillPayload payload) {
         if (ruleMode == RuleMode.TIMEOUT) {
             throw new TransientFailureException("待遇规则服务调用超时（模拟接口降级）");
@@ -76,10 +80,7 @@ public class DownstreamSimulator {
         if (payload.isForceRuleConflict()) {
             throw new RuleConflictException("清单同时命中门诊统筹与慢病专项规则，待遇互斥，需人工裁定");
         }
-        BigDecimal total = payload.getItems().stream()
-                .map(i -> i.getPrice().multiply(BigDecimal.valueOf(i.getQty())))
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-        return total.multiply(new BigDecimal("0.7")).setScale(2, RoundingMode.HALF_UP);
+        return calculationService.calculate(payload, task.getRuleVersion());
     }
 
     /** 基金回传：按操作号受理；DELAYED 模式下回执延迟 */

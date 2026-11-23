@@ -7,12 +7,16 @@ import com.example.clearing.domain.NodeType;
 import com.example.clearing.repo.CatalogItemRepository;
 import com.example.clearing.repo.DependencyEdgeRepository;
 import com.example.clearing.repo.DependencyNodeRepository;
+import com.example.clearing.repo.RuleSnapshotRepository;
+import com.example.clearing.service.LogicalClock;
+import com.example.clearing.service.RuleSnapshotService;
 import com.example.clearing.service.TokenBucketService;
+import java.math.BigDecimal;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
 
-/** 启动种子：依赖状态图节点/边、本地令牌桶、医保目录基线 */
+/** 启动种子：依赖状态图节点/边、本地令牌桶、医保目录基线、规则快照库基线 */
 @Component
 public class DataSeeder implements ApplicationRunner {
 
@@ -21,17 +25,26 @@ public class DataSeeder implements ApplicationRunner {
     private final CatalogItemRepository catalogRepository;
     private final TokenBucketService bucketService;
     private final ClearingProperties properties;
+    private final RuleSnapshotRepository ruleSnapshotRepository;
+    private final RuleSnapshotService ruleSnapshotService;
+    private final LogicalClock clock;
 
     public DataSeeder(DependencyNodeRepository nodeRepository,
             DependencyEdgeRepository edgeRepository,
             CatalogItemRepository catalogRepository,
             TokenBucketService bucketService,
-            ClearingProperties properties) {
+            ClearingProperties properties,
+            RuleSnapshotRepository ruleSnapshotRepository,
+            RuleSnapshotService ruleSnapshotService,
+            LogicalClock clock) {
         this.nodeRepository = nodeRepository;
         this.edgeRepository = edgeRepository;
         this.catalogRepository = catalogRepository;
         this.bucketService = bucketService;
         this.properties = properties;
+        this.ruleSnapshotRepository = ruleSnapshotRepository;
+        this.ruleSnapshotService = ruleSnapshotService;
+        this.clock = clock;
     }
 
     @Override
@@ -60,6 +73,11 @@ public class DataSeeder implements ApplicationRunner {
             catalogRepository.save(new CatalogItem("B-002", "布洛芬缓释片", "2026.11"));
             catalogRepository.save(new CatalogItem("C-003", "胰岛素注射液", "2026.11"));
             catalogRepository.save(new CatalogItem("D-004", "维生素C片", "2026.11"));
+        }
+        // 规则快照库基线：2026.11 统筹比例 0.70，与历史演示口径一致，立即生效
+        if (ruleSnapshotRepository.count() == 0) {
+            ruleSnapshotService.publish(properties.getRuleVersion(), new BigDecimal("0.7000"),
+                    clock.today(), "基线待遇规则：统筹支付比例 0.70");
         }
     }
 }

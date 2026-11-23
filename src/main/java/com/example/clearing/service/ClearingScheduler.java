@@ -35,6 +35,7 @@ public class ClearingScheduler {
     private final LedgerService ledgerService;
     private final FailureClassifier failureClassifier;
     private final EventLog eventLog;
+    private final RuleGovernanceService ruleGovernance;
 
     public ClearingScheduler(ClearingTaskRepository taskRepository,
             TokenBucketService bucketService,
@@ -45,7 +46,8 @@ public class ClearingScheduler {
             CatalogService catalogService,
             LedgerService ledgerService,
             FailureClassifier failureClassifier,
-            EventLog eventLog) {
+            EventLog eventLog,
+            RuleGovernanceService ruleGovernance) {
         this.taskRepository = taskRepository;
         this.bucketService = bucketService;
         this.budgetAllocator = budgetAllocator;
@@ -56,11 +58,14 @@ public class ClearingScheduler {
         this.ledgerService = ledgerService;
         this.failureClassifier = failureClassifier;
         this.eventLog = eventLog;
+        this.ruleGovernance = ruleGovernance;
     }
 
     @Transactional
     public TickResult tick() {
         TickResult result = new TickResult();
+        // 规则快照库：跨午夜到期的草稿规则先激活，再驱动本周期投放
+        ruleGovernance.runDueActivations();
         budgetAllocator.allocate();
         bucketService.refillAll();
         promoteWaiters(result);

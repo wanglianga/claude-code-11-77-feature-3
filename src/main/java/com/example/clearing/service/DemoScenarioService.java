@@ -2,10 +2,15 @@ package com.example.clearing.service;
 
 import com.example.clearing.domain.ClearingTask;
 import com.example.clearing.domain.DepHealth;
+import com.example.clearing.domain.DiffCaseStatus;
 import com.example.clearing.domain.EntryStatus;
 import com.example.clearing.domain.EntryType;
 import com.example.clearing.domain.FailureType;
 import com.example.clearing.domain.LedgerEntry;
+import com.example.clearing.domain.PublicationStatus;
+import com.example.clearing.domain.RuleDiffCase;
+import com.example.clearing.domain.RuleSnapshot;
+import com.example.clearing.domain.RuleSnapshotStatus;
 import com.example.clearing.domain.SourceType;
 import com.example.clearing.domain.StormReport;
 import com.example.clearing.domain.StormLevel;
@@ -14,10 +19,17 @@ import com.example.clearing.domain.TokenBucket;
 import com.example.clearing.dto.ScenarioResult;
 import com.example.clearing.repo.ClearingTaskRepository;
 import com.example.clearing.repo.FailureRecordRepository;
+import com.example.clearing.repo.ImpactNoticeRepository;
 import com.example.clearing.repo.LedgerEntryRepository;
 import com.example.clearing.repo.QuotaGrantRepository;
+import com.example.clearing.repo.ResultPublicationRepository;
+import com.example.clearing.repo.RuleDiffCaseRepository;
+import com.example.clearing.repo.RuleSnapshotRepository;
+import com.example.clearing.repo.ShadowRecalcRepository;
 import com.example.clearing.repo.StormReportRepository;
 import com.example.clearing.repo.TaskEventRepository;
+import com.example.clearing.repo.TaskRuleBindingRepository;
+import com.example.clearing.service.RuleGovernanceService.DiffAction;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
@@ -49,6 +61,15 @@ public class DemoScenarioService {
     private final FailureRecordRepository failureRepository;
     private final StormReportRepository stormRepository;
     private final QuotaGrantRepository quotaRepository;
+    private final ImpactNoticeRepository noticeRepository;
+    private final ResultPublicationRepository publicationRepository;
+    private final RuleDiffCaseRepository diffCaseRepository;
+    private final ShadowRecalcRepository shadowRepository;
+    private final TaskRuleBindingRepository bindingRepository;
+    private final RuleSnapshotRepository snapshotRepository;
+    private final RuleSnapshotService snapshotService;
+    private final RuleGovernanceService governance;
+    private final LogicalClock clock;
 
     public DemoScenarioService(TaskRegistrar registrar,
             ClearingScheduler scheduler,
@@ -64,7 +85,16 @@ public class DemoScenarioService {
             TaskEventRepository eventRepository,
             FailureRecordRepository failureRepository,
             StormReportRepository stormRepository,
-            QuotaGrantRepository quotaRepository) {
+            QuotaGrantRepository quotaRepository,
+            ImpactNoticeRepository noticeRepository,
+            ResultPublicationRepository publicationRepository,
+            RuleDiffCaseRepository diffCaseRepository,
+            ShadowRecalcRepository shadowRepository,
+            TaskRuleBindingRepository bindingRepository,
+            RuleSnapshotRepository snapshotRepository,
+            RuleSnapshotService snapshotService,
+            RuleGovernanceService governance,
+            LogicalClock clock) {
         this.registrar = registrar;
         this.scheduler = scheduler;
         this.bucketService = bucketService;
@@ -80,21 +110,39 @@ public class DemoScenarioService {
         this.failureRepository = failureRepository;
         this.stormRepository = stormRepository;
         this.quotaRepository = quotaRepository;
+        this.noticeRepository = noticeRepository;
+        this.publicationRepository = publicationRepository;
+        this.diffCaseRepository = diffCaseRepository;
+        this.shadowRepository = shadowRepository;
+        this.bindingRepository = bindingRepository;
+        this.snapshotRepository = snapshotRepository;
+        this.snapshotService = snapshotService;
+        this.governance = governance;
+        this.clock = clock;
     }
 
-    /** 演练复位：清空业务数据，恢复依赖健康、令牌桶与模拟器 */
+    /** 演练复位：清空业务数据，恢复依赖健康、令牌桶、模拟器与规则快照基线 */
     @Transactional
     public void reset() {
         eventRepository.deleteAll();
         failureRepository.deleteAll();
         stormRepository.deleteAll();
         quotaRepository.deleteAll();
+        noticeRepository.deleteAll();
+        publicationRepository.deleteAll();
+        diffCaseRepository.deleteAll();
+        shadowRepository.deleteAll();
         ledgerRepository.deleteAll();
+        bindingRepository.deleteAll();
         taskRepository.deleteAll();
+        snapshotRepository.deleteAll();
         bucketService.resetAll();
         graphService.resetHealth();
         simulator.reset();
         stormObserver.resetWindow();
+        clock.reset();
+        snapshotService.publish("2026.11", new java.math.BigDecimal("0.7000"), clock.today(),
+                "基线待遇规则：统筹支付比例 0.70（演练复位重建）");
     }
 
     @Transactional
@@ -107,9 +155,13 @@ public class DemoScenarioService {
             case "fund-pending-confirm" -> fundPendingConfirm();
             case "content-conflict" -> contentConflict();
             case "storm-watch" -> stormWatch();
+            case "rule-midnight-effective" -> ruleMidnightEffective();
+            case "rule-diff-withdraw" -> ruleDiffWithdraw();
+            case "two-batch-correction" -> twoBatchCorrection();
             default -> throw new IllegalArgumentException("未知场景: " + name
                     + "，可选：hospital-batch, pharmacy-return, catalog-conflict, rule-degradation, "
-                    + "fund-pending-confirm, content-conflict, storm-watch");
+                    + "fund-pending-confirm, content-conflict, storm-watch, "
+                    + "rule-midnight-effective, rule-diff-withdraw, two-batch-correction");
         };
     }
 
@@ -335,6 +387,225 @@ public class DemoScenarioService {
         s.check(taskRepository.findAll().stream().allMatch(t -> t.getStatus() == TaskStatus.CONFIRMED),
                 "风暴平息后全部任务最终 CONFIRMED");
         s.check(stormRepository.count() > 0, "风暴报告已留存供复盘");
+        return s;
+    }
+
+    // ---------- 规则治理三场景 ----------
+
+    /** 场景 8：规则跨午夜生效——队列中旧清单与新清单适用不同待遇规则，金额差异留痕，冻结结果不可覆盖 */
+    private ScenarioResult ruleMidnightEffective() {
+        ScenarioResult s = new ScenarioResult("rule-midnight-effective");
+        reset();
+        s.step("11-23：快照库仅生效 2026.11（统筹比例 0.70），登记旧清单 RULE-MID-OLD 并完成清算");
+        ClearingTask oldTask = reg("RULE-MID-OLD", "v1", SourceType.HOSPITAL, "1000.00",
+                payload("A-001", 10, "100.00"));
+        scheduler.tick();
+        ClearingTask oldDone = taskRepository.findById(oldTask.getId()).orElseThrow();
+        BigDecimal oldAmount = ledgerRepository.findByOperationNo(LedgerService.debitOpNo(oldDone))
+                .orElseThrow().getAmount();
+        s.check(oldDone.getStatus() == TaskStatus.CONFIRMED && oldAmount.compareTo(new BigDecimal("700.00")) == 0,
+                "旧清单按 2026.11 清算完成，统筹金额=700.00（1000×0.70），实际=" + oldAmount);
+        s.check("2026.11".equals(oldDone.getRuleVersion()),
+                "旧清单入队绑定规则版本 2026.11，实际=" + oldDone.getRuleVersion());
+
+        s.step("发布新规则 2026.12（比例 0.75），生效日为次日 2026-11-24，入库为 DRAFT 草稿");
+        RuleSnapshot draft = governance.publishRule("2026.12", new BigDecimal("0.7500"),
+                LocalDate.of(2026, 11, 24), "跨午夜生效演练：统筹比例上调至 0.75");
+        s.check(draft.getStatus() == RuleSnapshotStatus.DRAFT,
+                "未到生效日的新规则状态 DRAFT，实际=" + draft.getStatus());
+        s.check("2026.11".equals(snapshotService.currentEffectiveVersion()),
+                "午夜前当前生效版本仍为 2026.11，实际=" + snapshotService.currentEffectiveVersion());
+
+        s.step("午夜前再登记新清单 RULE-MID-NEW（与旧清单同在队列），入队时点绑定 2026.11");
+        ClearingTask queued = reg("RULE-MID-NEW", "v1", SourceType.HOSPITAL, "1000.00",
+                payload("A-001", 10, "100.00"));
+        s.check("2026.11".equals(taskRepository.findById(queued.getId()).orElseThrow().getRuleVersion()),
+                "午夜前入队任务绑定 2026.11");
+
+        s.step("逻辑时钟跨午夜推进到 2026-11-24，调度周期激活到期草稿");
+        clock.advanceDays(1);
+        List<RuleSnapshot> activated = governance.runDueActivations();
+        s.check(activated.size() == 1 && "2026.12".equals(activated.get(0).getVersion()),
+                "跨午夜后 2026.12 自动激活 EFFECTIVE，实际="
+                        + activated.stream().map(RuleSnapshot::getVersion).toList());
+        s.check("2026.12".equals(snapshotService.currentEffectiveVersion()),
+                "当前生效版本切换为 2026.12，实际=" + snapshotService.currentEffectiveVersion());
+        RuleSnapshot oldSnap = snapshotService.find("2026.11").orElseThrow();
+        s.check(oldSnap.getStatus() == RuleSnapshotStatus.SUPERSEDED
+                        && "2026.11".equals(draft.getPreviousVersion()),
+                "版本链：2026.11 置 SUPERSEDED 但快照保留，2026.12.previousVersion=2026.11，实际链="
+                        + oldSnap.getStatus() + "->" + draft.getPreviousVersion());
+
+        s.step("影子复算器对存量任务只算不写账：旧清单差额 50.00 进入差异裁决队列");
+        RuleDiffCase oldCase = governance.openCases().stream()
+                .filter(c -> "RULE-MID-OLD".equals(c.getBusinessKey())).findFirst().orElseThrow();
+        s.check(oldCase.isFrozen() && oldCase.getDeltaAmount().compareTo(new BigDecimal("50.00")) == 0,
+                "旧清单案件 frozen=true、差额=50.00（750-700），实际 frozen=" + oldCase.isFrozen()
+                        + " delta=" + oldCase.getDeltaAmount());
+
+        s.step("策略 A：未执行的新清单随最新规则统一重算（改绑留痕，初始绑定不删除）");
+        List<ClearingTask> rebound = governance.applyLatestToUnexecuted("跨午夜新规则生效，统一口径");
+        ClearingTask reboundTask = taskRepository.findById(queued.getId()).orElseThrow();
+        s.check(rebound.size() == 1 && "2026.12".equals(reboundTask.getRuleVersion())
+                        && "2026.11".equals(reboundTask.getBaselineRuleVersion()),
+                "仅 1 个未执行任务改绑 2026.12，初始绑定保留 2026.11，实际="
+                        + reboundTask.getRuleVersion() + "/" + reboundTask.getBaselineRuleVersion());
+
+        s.step("执行调度，新清单按 2026.12 清算，与旧清单适用规则不同");
+        scheduler.tick();
+        BigDecimal newAmount = ledgerRepository.findByOperationNo(
+                LedgerService.debitOpNo(taskRepository.findById(queued.getId()).orElseThrow()))
+                .orElseThrow().getAmount();
+        s.check(newAmount.compareTo(new BigDecimal("750.00")) == 0,
+                "新清单统筹金额=750.00（1000×0.75），实际=" + newAmount);
+
+        s.step("尝试批准已冻结旧清单的覆盖重算，必须被拒绝且案件保持 OPEN");
+        RuleDiffCase blocked = governance.recordSilentOverrideRejection(oldCase.getId(), "试图静默覆盖已回传结果");
+        s.check(blocked.getStatus() == DiffCaseStatus.OPEN
+                        && governance.requireCase(oldCase.getId()).getStatus() == DiffCaseStatus.OPEN,
+                "静默覆盖被拒绝（RESULT_FROZEN_REJECTED 已留痕），案件仍 OPEN，只能另发更正任务");
+
+        s.step("结果发布册：旧清单原始行金额 700.00、规则 2026.11 原样冻结");
+        var oldPub = publicationRepository.findByBusinessKeyOrderByRevisionSeqAsc("RULE-MID-OLD");
+        s.check(oldPub.size() == 1 && oldPub.get(0).getAmount().compareTo(new BigDecimal("700.00")) == 0
+                        && "2026.11".equals(oldPub.get(0).getRuleVersion()),
+                "发布册原始行未被改写，实际行数=" + oldPub.size() + " 金额=" + oldPub.get(0).getAmount());
+        return s;
+    }
+
+    /** 场景 9：人工裁决撤回——改绑后的未执行任务恢复入队时点规则，绑定版本链完整可复现 */
+    private ScenarioResult ruleDiffWithdraw() {
+        ScenarioResult s = new ScenarioResult("rule-diff-withdraw");
+        reset();
+        s.step("登记未执行清单 RULE-WD-1（报文总额 2000，入队绑定 2026.11），保持 READY 不调度");
+        ClearingTask task = reg("RULE-WD-1", "v1", SourceType.HOSPITAL, "2000.00",
+                payload("B-002", 10, "200.00"));
+
+        s.step("立即发布生效新规则 2026.12（比例 0.80），影子复算自动立案");
+        governance.publishRule("2026.12", new BigDecimal("0.8000"), clock.today(),
+                "人工裁决撤回演练：比例上调至 0.80");
+        RuleDiffCase diffCase = governance.openCases().stream()
+                .filter(c -> "RULE-WD-1".equals(c.getBusinessKey())).findFirst().orElseThrow();
+        s.check(!diffCase.isFrozen() && diffCase.getDeltaAmount().compareTo(new BigDecimal("200.00")) == 0,
+                "未执行案件 frozen=false，影子差额=200.00（1600-1400），实际=" + diffCase.getDeltaAmount());
+
+        s.step("先按策略 A 改绑最新规则（口径统一路径），绑定轨迹追加 REBIND");
+        governance.applyLatestToUnexecuted("演练：先改绑后撤回");
+        ClearingTask rebound = taskRepository.findById(task.getId()).orElseThrow();
+        s.check("2026.12".equals(rebound.getRuleVersion())
+                        && bindingRepository.findByTaskIdOrderBySeqAsc(task.getId()).size() == 2,
+                "改绑后当前版本 2026.12，绑定轨迹 2 条（INITIAL+REBIND）");
+
+        s.step("人工裁决撤回 WITHDRAW：案件关闭，任务恢复入队时点绑定 2026.11");
+        governance.adjudicate(diffCase.getId(), DiffAction.WITHDRAW, "验收撤回：维持 2026.11 口径");
+        RuleDiffCase after = governance.requireCase(diffCase.getId());
+        ClearingTask reverted = taskRepository.findById(task.getId()).orElseThrow();
+        s.check(after.getStatus() == DiffCaseStatus.WITHDRAWN
+                        && "2026.11".equals(reverted.getRuleVersion())
+                        && "2026.11".equals(reverted.getBaselineRuleVersion()),
+                "案件 WITHDRAWN，任务绑定恢复 2026.11，实际案件=" + after.getStatus()
+                        + " 绑定=" + reverted.getRuleVersion());
+        var trail = bindingRepository.findByTaskIdOrderBySeqAsc(task.getId());
+        s.check(trail.size() == 3 && trail.get(0).getBoundVersion().equals("2026.11")
+                        && trail.get(1).getBoundVersion().equals("2026.12")
+                        && trail.get(2).getBoundVersion().equals("2026.11"),
+                "版本链可复现：2026.11(INITIAL) → 2026.12(REBIND) → 2026.11(撤回恢复)，实际="
+                        + trail.stream().map(t -> t.getBoundVersion() + "/" + t.getBindKind()).toList());
+
+        s.step("执行调度，按撤回后的原口径 2026.11 清算");
+        scheduler.tick();
+        BigDecimal amount = ledgerRepository.findByOperationNo(
+                LedgerService.debitOpNo(taskRepository.findById(task.getId()).orElseThrow()))
+                .orElseThrow().getAmount();
+        s.check(amount.compareTo(new BigDecimal("1400.00")) == 0,
+                "撤回后按 0.70 口径计算=1400.00（2000×0.70），实际=" + amount);
+        boolean shadowDiscarded = shadowRepository.findByTaskIdOrderByIdDesc(task.getId()).stream()
+                .filter(r -> r.getDiffCaseId() != null && r.getDiffCaseId().equals(diffCase.getId()))
+                .allMatch(r -> r.getStatus() == com.example.clearing.domain.ShadowRecalcStatus.DISCARDED);
+        s.check(shadowDiscarded, "关联影子复算记录随撤回标记 DISCARDED");
+        return s;
+    }
+
+    /** 场景 10：两批同项清单补正日期不同——策略 B 另发更正任务，双版本账本、发布册与影响通知 */
+    private ScenarioResult twoBatchCorrection() {
+        ScenarioResult s = new ScenarioResult("two-batch-correction");
+        reset();
+        s.step("批次 B1（清算日 11-23）登记同项清单 RULE-TB-1 并完成清算");
+        ClearingTask t1 = registrar.register("B1", LocalDate.of(2026, 11, 23), "RULE-TB-1", "v1",
+                SourceType.HOSPITAL, new BigDecimal("1000.00"), payload("C-003", 5, "200.00")).task();
+        scheduler.tick();
+        s.step("跨午夜到 11-24，批次 B2 登记同项清单 RULE-TB-2 并完成清算");
+        clock.advanceDays(1);
+        ClearingTask t2 = registrar.register("B2", LocalDate.of(2026, 11, 24), "RULE-TB-2", "v1",
+                SourceType.HOSPITAL, new BigDecimal("1000.00"), payload("C-003", 5, "200.00")).task();
+        scheduler.tick();
+        s.check(status(t1) == TaskStatus.CONFIRMED && status(t2) == TaskStatus.CONFIRMED,
+                "两批清单均按 2026.11 清算 CONFIRMED（金额各 700.00）");
+
+        s.step("11-24 发布生效新规则 2026.12（比例 0.75），两笔已回传结果影子复算各差 50.00 立案");
+        governance.publishRule("2026.12", new BigDecimal("0.7500"), clock.today(),
+                "两批补正演练：比例上调至 0.75");
+        List<RuleDiffCase> cases = governance.openCases();
+        s.check(cases.size() == 2 && cases.stream().allMatch(RuleDiffCase::isFrozen)
+                        && cases.stream().allMatch(c -> c.getDeltaAmount().compareTo(new BigDecimal("50.00")) == 0),
+                "2 个 frozen 差异案件，差额各 50.00，实际=" + cases.size());
+
+        s.step("11-24 对 B1 案件裁决 ISSUE_CORRECTION：另发更正任务并调度完成");
+        RuleDiffCase case1 = cases.stream().filter(c -> "RULE-TB-1".equals(c.getBusinessKey())).findFirst().orElseThrow();
+        governance.adjudicate(case1.getId(), DiffAction.ISSUE_CORRECTION, "B1 补正");
+        ClearingTask correction1 = taskRepository.findById(
+                governance.requireCase(case1.getId()).getCorrectionTaskId()).orElseThrow();
+        s.check("v1-r1".equals(correction1.getBillVersion())
+                        && correction1.getCorrectionDate().equals(LocalDate.of(2026, 11, 24))
+                        && "2026.12".equals(correction1.getRuleVersion()),
+                "更正任务版本 v1-r1、补正日期 2026-11-24、绑定 2026.12，实际补正日="
+                        + correction1.getCorrectionDate());
+        scheduler.tick();
+
+        s.step("跨午夜到 11-25，对 B2 案件裁决 ISSUE_CORRECTION（补正日期与 B1 不同）");
+        clock.advanceDays(1);
+        RuleDiffCase case2 = cases.stream().filter(c -> "RULE-TB-2".equals(c.getBusinessKey())).findFirst().orElseThrow();
+        governance.adjudicate(case2.getId(), DiffAction.ISSUE_CORRECTION, "B2 补正");
+        ClearingTask correction2 = taskRepository.findById(
+                governance.requireCase(case2.getId()).getCorrectionTaskId()).orElseThrow();
+        scheduler.tick();
+        s.check(correction2.getCorrectionDate().equals(LocalDate.of(2026, 11, 25))
+                        && !correction2.getCorrectionDate().equals(correction1.getCorrectionDate()),
+                "两批补正日期不同：B1=2026-11-24，B2=2026-11-25，实际="
+                        + correction1.getCorrectionDate() + "/" + correction2.getCorrectionDate());
+
+        s.step("双版本账本：原分录 700.00 保留不动，更正分录 750.00 独立入账");
+        for (String key : List.of("RULE-TB-1", "RULE-TB-2")) {
+            BigDecimal originDebit = ledgerRepository.findByOperationNo("CD-" + key + "-v1")
+                    .orElseThrow().getAmount();
+            BigDecimal correctionDebit = ledgerRepository.findByOperationNo("CD-" + key + "-v1-r1")
+                    .orElseThrow().getAmount();
+            s.check(originDebit.compareTo(new BigDecimal("700.00")) == 0
+                            && correctionDebit.compareTo(new BigDecimal("750.00")) == 0,
+                    key + " 原扣款 700.00 未改写、更正扣款 750.00 独立存在，实际="
+                            + originDebit + "/" + correctionDebit);
+        }
+
+        s.step("结果发布册：每业务键两行版本链，原行 SUPERSEDED 金额保留，更正行 PUBLISHED");
+        for (String key : List.of("RULE-TB-1", "RULE-TB-2")) {
+            var trail = publicationRepository.findByBusinessKeyOrderByRevisionSeqAsc(key);
+            s.check(trail.size() == 2
+                            && trail.get(0).getStatus() == PublicationStatus.SUPERSEDED
+                            && trail.get(0).getAmount().compareTo(new BigDecimal("700.00")) == 0
+                            && "2026.11".equals(trail.get(0).getRuleVersion())
+                            && trail.get(1).getStatus() == PublicationStatus.PUBLISHED
+                            && trail.get(1).getAmount().compareTo(new BigDecimal("750.00")) == 0
+                            && "2026.12".equals(trail.get(1).getRuleVersion()),
+                    key + " 发布册版本链：原行保留 700/2026.11，更正行 750/2026.12");
+        }
+        s.check(noticeRepository.count() == 4,
+                "影响通知：每案件向基金侧+医疗机构侧各 1 条，共 4 条，实际=" + noticeRepository.count());
+        s.check(noticeRepository.findAll().stream()
+                        .allMatch(n -> n.getDeltaAmount().compareTo(new BigDecimal("50.00")) == 0),
+                "通知均载明差额 50.00 与新旧版本/金额");
+        s.check(status(t1) == TaskStatus.CONFIRMED && status(t2) == TaskStatus.CONFIRMED
+                        && t1.getId() != correction1.getId(),
+                "原任务保持 CONFIRMED 不被静默覆盖，更正任务为独立任务");
         return s;
     }
 
